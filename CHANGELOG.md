@@ -31,6 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tool can't flood the caller's context. `--max-bytes 0` disables it.
 - "Did you mean …?" suggestions for unknown server names and commands.
 - TTY-aware colored output, honoring `NO_COLOR` and `--no-color`.
+- A repo `climcp.json` with a safe, path-portable set of servers (gopls, fs,
+  git, time) so the project is self-equipped out of the box.
 - Detailed `--help` with full call grammar and worked examples. The help is
   dynamic: it lists the servers currently configured (honoring `--config`) with
   the next-step `describe`/`call` workflow, so an agent sees what's available at

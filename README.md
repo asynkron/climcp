@@ -106,6 +106,28 @@ When `--config` is not given, the first existing file is used, in order:
 2. `~/.config/climcp/config.json`
 3. `~/.climcp.json`
 
+### This repo's config
+
+This repository ships a [`climcp.json`](climcp.json) with a small, safe set of
+servers, all scoped to the current directory (no hard-coded paths), so it works
+for anyone who clones it and runs `climcp` from the repo root:
+
+| Server | Command | What it's for |
+|--------|---------|---------------|
+| `gopls` | `gopls mcp` | Go code intelligence — search symbols, package APIs, diagnostics, rename. |
+| `fs` | `npx … server-filesystem .` | Read/write files within the repo. |
+| `git` | `uvx mcp-server-git --repository .` | Status, diffs, log, blame on this repo. |
+| `time` | `uvx mcp-server-time` | Current time and timezone conversions. |
+
+Prerequisites: [`gopls`](https://pkg.go.dev/golang.org/x/tools/gopls)
+(`go install golang.org/x/tools/gopls@latest`), `npx` (Node), and `uvx`
+([uv](https://docs.astral.sh/uv/)). A quick taste, powered by gopls:
+
+```sh
+climcp call "gopls.go_search(query: 'tooLargeError')"
+climcp call "gopls.go_package_api(packagePaths: ['github.com/asynkron/climcp/internal/mcp'])"
+```
+
 ### Reuse or import an existing config
 
 Because the format matches the usual `mcpServers` shape, you can point climcp
