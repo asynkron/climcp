@@ -13,6 +13,31 @@ call those operations directly from the command line.
 Both **stdio** (a spawned child process) and **HTTP** (Streamable HTTP / SSE)
 servers are supported.
 
+## Why — stop letting MCP servers eat your context
+
+When you wire MCP servers directly into an agent, every server dumps the full
+definition of **every** tool it exposes — names, descriptions, and JSON
+schemas — into the model's context window, on every single turn. Connect a
+handful of servers and you've burned thousands of tokens before the agent has
+done anything. That context is gone: it's not available for the actual task,
+and you pay for it on every request.
+
+`climcp` moves all of that out of the model and into the shell. The agent
+doesn't preload anything. It:
+
+- discovers servers on demand (`climcp mcp list`),
+- looks up a server's operations only when it needs them (`climcp describe X`),
+- and calls an operation as a plain shell command (`climcp call "X.op(...)"`).
+
+The only thing that ever enters the context window is the specific call the
+agent chose to make and the result it got back. **No always-on tool schemas, no
+per-turn overhead — all that context is freed up for the work that matters.**
+
+And because it's just a CLI writing to stdout, you can **compose** calls with
+ordinary shell tooling — pipe results through `jq`, feed one call's output into
+the next, loop over them — which the MCP protocol itself cannot do. See
+[Chaining calls](#chaining-calls).
+
 ```console
 $ climcp mcp list
 2 MCP servers configured in ./climcp.json
@@ -156,6 +181,49 @@ Pipe the raw result into `jq`:
 ```sh
 climcp --json call "fs.list_directory(path: '/tmp')" | jq '.content'
 ```
+
+## Chaining calls
+
+This is the part the MCP protocol can't do for you. Because every call is just
+a command that writes JSON to stdout, you can **fetch → transform → fetch →
+transform** in a single shell pipeline, with the intermediate data living in the
+shell instead of being shuttled back through the model's context.
+
+A tool's payload is usually JSON encoded inside a text content block, so the
+recurring move is `jq -r '.content[0].text'` to unwrap it, then a second `jq` to
+reshape it.
+
+```sh
+# 1. Fetch open issues from a GitHub MCP server
+# 2. jq out the number of the most recently updated one
+# 3. Fetch that issue's full details from the MCP
+# 4. jq the final shape we care about
+issue=$(climcp --json call "github.list_issues(repo: 'asynkron/climcp', state: 'open')" \
+  | jq -r '.content[0].text' \
+  | jq 'sort_by(.updated_at) | last | .number')
+
+climcp --json call "github.get_issue(repo: 'asynkron/climcp', number: $issue)" \
+  | jq -r '.content[0].text' \
+  | jq '{title, author: .user.login, comments}'
+```
+
+Each step is independent and composable: swap a `jq` filter, redirect to a file,
+`xargs` the results into N parallel calls, feed one server's output into a
+different server. None of this is expressible in the MCP protocol, where the
+agent would have to carry every intermediate result through its own context just
+to hand it to the next tool call.
+
+```sh
+# Cross-server: read a list of URLs from disk via one MCP, fetch each via another
+climcp --json call "fs.read_text_file(path: '/tmp/urls.txt')" \
+  | jq -r '.content[0].text' \
+  | while read -r url; do
+      climcp --json call "fetch.fetch(url: '$url')" | jq -r '.content[0].text | length'
+    done
+```
+
+> The operation and field names above (`github.list_issues`, `fetch.fetch`, …)
+> are illustrative — run `climcp describe <server>` to see the real ones.
 
 ## How it works
 
