@@ -14,7 +14,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `climcp call "<server>.<op>(args)"` — invoke an operation. Arguments accept
   both a JSON object and a collapsed function-call form
   (`op(foo: 1, bar: 'hej')`).
-- Flag aliases `--describe` and `--call`.
+- `climcp import <file>` — merge servers from an existing config (the
+  `mcpServers` or `servers` shape) into a climcp config, with `--to`,
+  `--overwrite`, and `--dry-run`.
+- Flag aliases `--describe`, `--call`, and `--import`.
 - Two transports: **stdio** (spawned process) and **HTTP** (Streamable HTTP,
   including `text/event-stream` responses and session reuse).
 - Config compatible with the `mcpServers` / `mcp.json` shape, searched at

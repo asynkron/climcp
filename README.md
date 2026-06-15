@@ -81,6 +81,27 @@ When `--config` is not given, the first existing file is used, in order:
 2. `~/.config/climcp/config.json`
 3. `~/.climcp.json`
 
+### Reuse or import an existing config
+
+Because the format matches the usual `mcpServers` shape, you can point climcp
+straight at an agent's config without changing anything:
+
+```sh
+climcp --config ~/.cursor/mcp.json mcp list
+```
+
+Or import its servers into your own `climcp.json` so you don't have to repeat
+`--config`:
+
+```sh
+climcp import ~/.cursor/mcp.json            # merge into ./climcp.json
+climcp import ~/.cursor/mcp.json --to ~/.config/climcp/config.json
+climcp import ~/.cursor/mcp.json --overwrite --dry-run   # preview replacements
+```
+
+Import accepts both the `mcpServers` and `servers` config shapes. Name clashes
+are skipped by default (reported), unless you pass `--overwrite`.
+
 ## Commands
 
 | Command | Description |
@@ -88,6 +109,7 @@ When `--config` is not given, the first existing file is used, in order:
 | `climcp mcp list` | List configured servers (name, transport, endpoint). |
 | `climcp describe <server>` | Connect and list the server's operations and parameters. |
 | `climcp call "<server>.<op>(args)"` | Invoke an operation with arguments. |
+| `climcp import <file>` | Merge servers from an existing config into your `climcp.json`. |
 | `climcp --help` | Detailed help with the full call grammar and examples. |
 | `climcp --version` | Print the version. |
 

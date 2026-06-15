@@ -86,6 +86,53 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestParseServers(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	mcp := write("mcp.json", `{"mcpServers":{"a":{"command":"x"}}}`)
+	vscode := write("vscode.json", `{"servers":{"b":{"url":"https://y"}}}`)
+	empty := write("empty.json", `{"other":true}`)
+
+	if got, err := ParseServers(mcp); err != nil || len(got) != 1 || got["a"].Command != "x" {
+		t.Errorf("mcpServers shape: got %#v err %v", got, err)
+	}
+	if got, err := ParseServers(vscode); err != nil || len(got) != 1 || got["b"].URL != "https://y" {
+		t.Errorf("servers shape: got %#v err %v", got, err)
+	}
+	if got, err := ParseServers(empty); err != nil || len(got) != 0 {
+		t.Errorf("no-servers file should yield empty map, got %#v err %v", got, err)
+	}
+	if _, err := ParseServers(filepath.Join(dir, "missing.json")); err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+func TestSaveRoundTrip(t *testing.T) {
+	// Save into a nested path that doesn't exist yet, then load it back.
+	path := filepath.Join(t.TempDir(), "nested", "dir", "climcp.json")
+	servers := map[string]Server{
+		"a": {Command: "x", Args: []string{"--flag"}},
+		"b": {Type: "http", URL: "https://y"},
+	}
+	if err := Save(path, servers); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Servers) != 2 || cfg.Servers["a"].Command != "x" || cfg.Servers["b"].URL != "https://y" {
+		t.Errorf("round-trip mismatch: %#v", cfg.Servers)
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
 }

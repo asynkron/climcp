@@ -209,3 +209,51 @@ func Load(explicitPath string) (*Config, error) {
 	cfg.Path = path
 	return &cfg, nil
 }
+
+// ParseServers reads MCP server definitions from an arbitrary config file. It
+// accepts both the common "mcpServers" key (Claude Desktop, Cursor, …) and the
+// "servers" key (some VS Code configs). The returned map may be empty if the
+// file is well-formed JSON but defines no servers.
+func ParseServers(path string) (map[string]Server, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	var probe struct {
+		MCPServers map[string]Server `json:"mcpServers"`
+		Servers    map[string]Server `json:"servers"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	switch {
+	case len(probe.MCPServers) > 0:
+		return probe.MCPServers, nil
+	case len(probe.Servers) > 0:
+		return probe.Servers, nil
+	default:
+		return map[string]Server{}, nil
+	}
+}
+
+// Save writes the given servers to path as a climcp config ("mcpServers"
+// object), creating parent directories as needed.
+func Save(path string, servers map[string]Server) error {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("creating %s: %w", dir, err)
+		}
+	}
+	out := struct {
+		Servers map[string]Server `json:"mcpServers"`
+	}{Servers: servers}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}

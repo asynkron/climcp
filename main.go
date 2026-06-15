@@ -32,6 +32,17 @@ USAGE
   climcp <command> [arguments] [flags]
   climcp [flags]
 
+GETTING STARTED
+  climcp reads a JSON config listing your MCP servers (see CONFIG FILE below).
+  Three ways to get one:
+
+    1. Write a ./climcp.json yourself with an "mcpServers" object.
+    2. Reuse an existing agent config as-is - the format matches, so you can
+       point straight at it:
+         climcp --config ~/.cursor/mcp.json mcp list
+    3. Import servers from an existing config into your own climcp.json:
+         climcp import ~/.cursor/mcp.json
+
 COMMANDS
   mcp list                     List the servers defined in your config.
   describe <server>            Connect to <server> and list its operations,
@@ -39,12 +50,21 @@ COMMANDS
   call "<server>.<op>(args)"   Connect to <server> and invoke operation <op>
                                with the given arguments. Quote the whole
                                expression so the shell keeps it as one word.
+  import <file>                Merge the servers from <file> into your climcp
+                               config (default ./climcp.json). Accepts the
+                               "mcpServers" and "servers" config shapes.
   help, --help, -h             Show this help.
   version, --version, -v       Print the climcp version.
 
   Equivalent flag forms (handy for scripts):
     climcp --describe <server>          same as: climcp describe <server>
     climcp --call "<server>.<op>(...)"  same as: climcp call "<server>.<op>(...)"
+    climcp --import <file>              same as: climcp import <file>
+
+IMPORT FLAGS
+  --to <path>       Destination config to merge into (default ./climcp.json).
+  --overwrite       Replace servers whose names already exist (default: skip).
+  --dry-run         Show what would change without writing anything.
 
 GLOBAL FLAGS
   --config <path>   Use a specific config file instead of searching the
@@ -119,6 +139,12 @@ EXAMPLES
   # Call a remote HTTP server defined in the config
   climcp call "remote.search(q: 'mcp')"
 
+  # Import servers from an existing agent config into ./climcp.json
+  climcp import ~/.cursor/mcp.json
+
+  # Preview an import without writing, replacing any name clashes
+  climcp import ~/.cursor/mcp.json --overwrite --dry-run
+
 CONFIG FILE
   Format is compatible with the usual mcp.json "mcpServers" shape. A server is
   either stdio (a spawned child process) or http (a remote URL). The transport
@@ -176,10 +202,14 @@ type options struct {
 
 // parsedArgs holds the flags pulled out of the raw argv, plus the leftovers.
 type parsedArgs struct {
-	opts     options
-	describe string // set by --describe
-	call     string // set by --call
-	rest     []string
+	opts       options
+	describe   string // set by --describe
+	call       string // set by --call
+	importFile string // set by --import
+	importTo   string // set by --to
+	overwrite  bool   // set by --overwrite
+	dryRun     bool   // set by --dry-run
+	rest       []string
 }
 
 func parseFlags(argv []string) (*parsedArgs, error) {
@@ -214,6 +244,10 @@ func parseFlags(argv []string) (*parsedArgs, error) {
 			p.opts.jsonOut = true
 		case arg == "--no-color":
 			ui.SetEnabled(false)
+		case arg == "--overwrite":
+			p.overwrite = true
+		case arg == "--dry-run":
+			p.dryRun = true
 		default:
 			if v, ok, err := valueFor("--config"); err != nil {
 				return nil, err
@@ -243,6 +277,18 @@ func parseFlags(argv []string) (*parsedArgs, error) {
 				p.call = v
 				continue
 			}
+			if v, ok, err := valueFor("--import"); err != nil {
+				return nil, err
+			} else if ok {
+				p.importFile = v
+				continue
+			}
+			if v, ok, err := valueFor("--to"); err != nil {
+				return nil, err
+			} else if ok {
+				p.importTo = v
+				continue
+			}
 			if strings.HasPrefix(arg, "-") {
 				return nil, fmt.Errorf("unknown flag %q (try: climcp --help)", arg)
 			}
@@ -269,6 +315,9 @@ func run(argv []string) error {
 	}
 	if p.call != "" {
 		return cmdCall(p.opts, p.call)
+	}
+	if p.importFile != "" {
+		return cmdImport(p, p.importFile)
 	}
 
 	if len(p.rest) == 0 {
@@ -297,6 +346,11 @@ func run(argv []string) error {
 			return fmt.Errorf("call requires an expression: climcp call \"<server>.<op>(args)\"")
 		}
 		return cmdCall(p.opts, p.rest[1])
+	case "import":
+		if len(p.rest) < 2 {
+			return fmt.Errorf("import requires a source file: climcp import <file>")
+		}
+		return cmdImport(p, p.rest[1])
 	default:
 		msg := fmt.Sprintf("unknown command %q", p.rest[0])
 		if s := suggestCommand(p.rest[0]); s != "" {
@@ -310,7 +364,7 @@ func run(argv []string) error {
 func suggestCommand(input string) string {
 	const maxDist = 2
 	best, bestDist := "", maxDist+1
-	for _, c := range []string{"mcp", "list", "describe", "call", "help", "version"} {
+	for _, c := range []string{"mcp", "list", "describe", "call", "import", "help", "version"} {
 		if d := config.EditDistance(input, c); d < bestDist {
 			best, bestDist = c, d
 		}
@@ -514,6 +568,88 @@ func cmdCall(opts options, expr string) error {
 		return fmt.Errorf("the operation reported an error (see output above)")
 	}
 	return nil
+}
+
+// cmdImport merges the servers defined in a source config file into a climcp
+// config file (default ./climcp.json).
+func cmdImport(p *parsedArgs, source string) error {
+	incoming, err := config.ParseServers(source)
+	if err != nil {
+		return err
+	}
+	if len(incoming) == 0 {
+		return fmt.Errorf("no MCP servers found in %s (expected an \"mcpServers\" or \"servers\" object)", source)
+	}
+
+	dest := p.importTo
+	if dest == "" {
+		dest = "climcp.json"
+	}
+
+	// Start from the destination's current contents, if it exists.
+	existing := map[string]config.Server{}
+	if data, err := config.ParseServers(dest); err == nil {
+		existing = data
+	}
+
+	var added, overwritten, skipped []string
+	for _, name := range sortedKeys(incoming) {
+		_, clash := existing[name]
+		switch {
+		case !clash:
+			existing[name] = incoming[name]
+			added = append(added, name)
+		case p.overwrite:
+			existing[name] = incoming[name]
+			overwritten = append(overwritten, name)
+		default:
+			skipped = append(skipped, name)
+		}
+	}
+
+	action := "Imported"
+	if p.dryRun {
+		action = "Would import"
+	}
+	fmt.Printf("%s from %s into %s\n", action, ui.Dim(source), ui.Dim(dest))
+	reportNames(ui.Green("  + added:      "), added)
+	reportNames(ui.Yellow("  ~ overwritten:"), overwritten)
+	if len(skipped) > 0 {
+		reportNames(ui.Dim("  - skipped:    "), skipped)
+		fmt.Println(ui.Dim("    (already present; pass --overwrite to replace them)"))
+	}
+
+	if p.dryRun {
+		fmt.Println(ui.Dim("\nDry run: no files were written."))
+		return nil
+	}
+	if len(added) == 0 && len(overwritten) == 0 {
+		fmt.Println(ui.Dim("\nNothing to write."))
+		return nil
+	}
+	if err := config.Save(dest, existing); err != nil {
+		return err
+	}
+	fmt.Printf("\nWrote %s\n", dest)
+	return nil
+}
+
+// reportNames prints "label a, b, c" only when there are names to report.
+func reportNames(label string, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	fmt.Printf("%s %s\n", label, strings.Join(names, ", "))
+}
+
+// sortedKeys returns the map keys in sorted order.
+func sortedKeys(m map[string]config.Server) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // printJSON pretty-prints v as JSON to stdout.
