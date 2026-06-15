@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -74,6 +75,9 @@ GLOBAL FLAGS
                     Works with 'mcp list', 'describe', and 'call'.
   --timeout <dur>   Abort if a server doesn't respond within this duration
                     (default 60s). Accepts Go durations: 500ms, 30s, 2m.
+  --max-bytes <n>   Fail a 'call' whose rendered response exceeds n bytes
+                    (default 51200 = 50 KB), showing only a short preview.
+                    Keeps a runaway tool from flooding your context. 0 disables.
   --no-color        Disable colored output (or set the NO_COLOR env var).
 
   Colors are used automatically only when writing to a terminal; piped or
@@ -199,7 +203,16 @@ type options struct {
 	configPath string
 	jsonOut    bool
 	timeout    time.Duration
+	maxBytes   int
 }
+
+// Response-size guard defaults. The point of climcp is to keep MCP output out
+// of the caller's context window; a single tool that returns megabytes would
+// defeat that, so by default an oversized response is treated as a failure.
+const (
+	defaultMaxBytes = 50 << 10 // 50 KB of rendered output before we bail
+	previewBytes    = 2 << 10  // how much of an oversized response we still show
+)
 
 // parsedArgs holds the flags pulled out of the raw argv, plus the leftovers.
 type parsedArgs struct {
@@ -216,7 +229,7 @@ type parsedArgs struct {
 }
 
 func parseFlags(argv []string) (*parsedArgs, error) {
-	p := &parsedArgs{opts: options{timeout: 60 * time.Second}}
+	p := &parsedArgs{opts: options{timeout: 60 * time.Second, maxBytes: defaultMaxBytes}}
 
 	// needValue returns the value for a flag, supporting both "--flag value"
 	// and "--flag=value" forms.
@@ -264,6 +277,16 @@ func parseFlags(argv []string) (*parsedArgs, error) {
 					return nil, fmt.Errorf("invalid --timeout %q: %v (use e.g. 30s, 2m)", v, perr)
 				}
 				p.opts.timeout = d
+				continue
+			}
+			if v, ok, err := valueFor("--max-bytes"); err != nil {
+				return nil, err
+			} else if ok {
+				n, perr := strconv.Atoi(v)
+				if perr != nil || n < 0 {
+					return nil, fmt.Errorf("invalid --max-bytes %q: want a non-negative integer (0 disables the limit)", v)
+				}
+				p.opts.maxBytes = n
 				continue
 			}
 			if v, ok, err := valueFor("--describe"); err != nil {
@@ -609,18 +632,56 @@ func cmdCall(opts options, expr string) error {
 		return err
 	}
 
+	// Render what we would emit, then guard its size before printing any of it.
+	var out string
 	if opts.jsonOut {
-		if err := printJSON(result); err != nil {
+		b, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
 			return err
 		}
+		out = string(b)
 	} else {
-		printResult(result)
+		out = renderResult(result)
 	}
+
+	if opts.maxBytes > 0 && len(out) > opts.maxBytes {
+		return tooLargeError(out, opts.maxBytes)
+	}
+
+	fmt.Println(strings.TrimRight(out, "\n"))
 
 	if result.IsError {
 		return fmt.Errorf("the operation reported an error (see output above)")
 	}
 	return nil
+}
+
+// tooLargeError emits a bounded preview of an oversized response and returns an
+// error so the caller treats the call as failed instead of ingesting the blob.
+func tooLargeError(out string, limit int) error {
+	n := previewBytes
+	if n > len(out) {
+		n = len(out)
+	}
+	fmt.Println(strings.TrimRight(out[:n], "\n"))
+	fmt.Println(ui.Dim("…[response truncated by climcp]"))
+	return fmt.Errorf(
+		"response too large: %s exceeds the --max-bytes limit of %s (only the first %s is shown above).\n"+
+			"Narrow the call (add a path/limit/query argument, or pipe --json through jq to extract a subset),\n"+
+			"or raise the cap with --max-bytes <n> (use 0 to disable the guard).",
+		humanBytes(len(out)), humanBytes(limit), humanBytes(n))
+}
+
+// humanBytes formats a byte count as B / KB / MB.
+func humanBytes(n int) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 // cmdImport merges the servers defined in a source config file into a climcp
@@ -712,19 +773,25 @@ func printJSON(v interface{}) error {
 	return enc.Encode(v)
 }
 
-func printResult(result *mcp.CallToolResult) {
+// renderResult turns a tool result into the text climcp would print, so the
+// caller can measure it before deciding whether to emit it.
+func renderResult(result *mcp.CallToolResult) string {
+	var b strings.Builder
 	for _, block := range result.Content {
 		switch block.Type {
 		case "text":
-			fmt.Println(block.Text)
+			b.WriteString(block.Text)
 		default:
-			// Non-text content: dump the raw block so nothing is lost.
-			fmt.Println(string(block.Raw))
+			// Non-text content: keep the raw block so nothing is lost.
+			b.Write(block.Raw)
 		}
+		b.WriteByte('\n')
 	}
 	if len(result.Content) == 0 && len(result.StructuredContent) > 0 {
-		fmt.Println(string(result.StructuredContent))
+		b.Write(result.StructuredContent)
+		b.WriteByte('\n')
 	}
+	return b.String()
 }
 
 // commandContext returns a context cancelled on SIGINT/SIGTERM and after the

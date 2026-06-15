@@ -148,6 +148,7 @@ Flag-style aliases also work: `climcp --describe <server>` and
 | `--config <path>` | Use a specific config file. |
 | `--json` | Emit JSON instead of formatted text (works with all three commands). |
 | `--timeout <dur>` | Abort if the server is unresponsive (default `60s`; e.g. `30s`, `2m`). |
+| `--max-bytes <n>` | Fail a `call` whose response exceeds `n` bytes (default `51200` = 50 KB); `0` disables. |
 | `--no-color` | Disable colored output (also honors the `NO_COLOR` env var). |
 
 Colors are used automatically only when writing to a terminal; piped or
@@ -232,6 +233,15 @@ child process for stdio, or POSTing to the URL for HTTP), performs the MCP
 `initialize` handshake over JSON-RPC 2.0, then issues `tools/list` or
 `tools/call`. A stdio child is shut down when the command finishes, and the
 whole operation is bounded by `--timeout` and cancelled on Ctrl-C.
+
+### Response-size guard
+
+Because the whole point is to keep MCP output *out* of your context, a single
+tool that returns megabytes would defeat it. So a `call` whose rendered response
+exceeds `--max-bytes` (default 50 KB) is treated as a **failure**: climcp prints
+only a short preview, writes an explanatory error to stderr, and exits non-zero.
+Raise the cap with `--max-bytes <n>`, disable it with `--max-bytes 0`, or narrow
+the call (add a `limit`/`path`/`query` argument, or pipe `--json` through `jq`).
 
 ## Development
 

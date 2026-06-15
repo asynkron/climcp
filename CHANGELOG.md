@@ -26,6 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--json` output for `mcp list`, `describe`, and `call`.
 - `--timeout` flag (default 60s) and SIGINT/SIGTERM handling so a hung server
   can't wedge the CLI.
+- Response-size guard: a `call` whose rendered response exceeds `--max-bytes`
+  (default 50 KB) fails with a short preview and a non-zero exit, so a runaway
+  tool can't flood the caller's context. `--max-bytes 0` disables it.
 - "Did you mean …?" suggestions for unknown server names and commands.
 - TTY-aware colored output, honoring `NO_COLOR` and `--no-color`.
 - Detailed `--help` with full call grammar and worked examples. The help is
