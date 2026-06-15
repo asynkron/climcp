@@ -22,43 +22,129 @@ var version = "dev"
 
 const usage = `climcp - a bridge to MCP servers (stdio and http)
 
-Usage:
-  climcp mcp list                       List configured MCP servers
-  climcp describe <server>              Show the operations a server exposes
-  climcp call "<server>.<op>(args)"     Call an operation on a server
-  climcp --help                         Show this help
+  Lists configured Model Context Protocol servers, describes the operations
+  each one exposes, and calls those operations from your shell.
 
-Equivalent flag forms:
-  climcp --describe <server>
-  climcp --call "<server>.<op>(args)"
+USAGE
+  climcp <command> [arguments] [flags]
+  climcp [flags]
 
-Argument styles for call (both are equivalent):
-  climcp call 'fs.read_file({"path": "/tmp/a.txt"})'      JSON object
-  climcp call "fs.read_file(path: '/tmp/a.txt')"          collapsed form
+COMMANDS
+  mcp list                     List the servers defined in your config.
+  describe <server>            Connect to <server> and list its operations,
+                               each with its parameters and description.
+  call "<server>.<op>(args)"   Connect to <server> and invoke operation <op>
+                               with the given arguments. Quote the whole
+                               expression so the shell keeps it as one word.
+  help, --help, -h             Show this help.
+  version, --version, -v       Print the climcp version.
 
-Global flags:
-  --config <path>   Use a specific config file instead of searching defaults.
-  --json            For 'call', print the raw JSON result instead of text.
+  Equivalent flag forms (handy for scripts):
+    climcp --describe <server>          same as: climcp describe <server>
+    climcp --call "<server>.<op>(...)"  same as: climcp call "<server>.<op>(...)"
 
-Config file (climcp.json), compatible with the usual mcp.json shape.
-Servers are stdio (a spawned process) or http (a remote URL):
+GLOBAL FLAGS
+  --config <path>   Use a specific config file instead of searching the
+                    default locations. May also be written --config=<path>.
+  --json            For 'call', print the raw JSON-RPC result (pretty-printed)
+                    instead of just the text content. Useful for piping to jq.
+
+CALL SYNTAX
+  An expression has three parts:
+
+    <server> . <operation> ( <arguments> )
+       |          |              |
+       |          |              +-- arguments, in one of the two styles below
+       |          +----------------- the operation/tool name (from 'describe')
+       +---------------------------- a server name (from 'mcp list')
+
+  The argument list inside the parentheses accepts TWO equivalent styles:
+
+  1) JSON object  - a single, standard JSON object:
+       fs.read_file({"path": "/tmp/a.txt", "tail": 20})
+
+  2) Collapsed    - function-call style; the outer braces are dropped and
+                    keys are written bare, like named arguments:
+       fs.read_file(path: '/tmp/a.txt', tail: 20)
+
+  Both produce the same call. The collapsed form is lenient:
+    - keys      : bare identifiers (foo, my-key, a.b) or quoted ("foo")
+    - strings   : single OR double quoted          'hej'   "hej"
+    - numbers   : 1, -3, 1.5                        (unquoted)
+    - booleans  : true, false                       (unquoted)
+    - null      : null                              (unquoted)
+    - objects   : {kind: 'file', size: 10}          (may nest)
+    - arrays    : ['a', 'b', 3]                      (may nest)
+    - a trailing comma before ) or } is allowed
+  Bare/unquoted strings are rejected on purpose - always quote string values.
+
+  No arguments? Use empty parentheses:
+       time.now()
+
+EXAMPLES
+  # List configured servers
+  climcp mcp list
+
+  # Use a config that isn't in a default location
+  climcp --config ./my-servers.json mcp list
+
+  # Discover what a server can do
+  climcp describe fs
+
+  # Call with the collapsed (named-argument) style
+  climcp call "fs.read_file(path: '/etc/hosts')"
+
+  # The same call, JSON style (note the single quotes around the whole arg
+  # so the shell doesn't touch the double quotes inside)
+  climcp call 'fs.read_file({"path": "/etc/hosts"})'
+
+  # Nested object and array arguments
+  climcp call "search.query(filter: {kind: 'file', tags: ['go', 'cli']}, limit: 5)"
+
+  # No arguments
+  climcp call "time.now()"
+
+  # Get the raw JSON result and pipe it to jq
+  climcp --json call "fs.list_directory(path: '/tmp')" | jq '.content'
+
+  # Call a remote HTTP server defined in the config
+  climcp call "remote.search(q: 'mcp')"
+
+CONFIG FILE
+  Format is compatible with the usual mcp.json "mcpServers" shape. A server is
+  either stdio (a spawned child process) or http (a remote URL). The transport
+  is inferred: a "url" - or "type" of http/sse/streamable-http - means http;
+  otherwise stdio.
+
   {
     "mcpServers": {
-      "fs": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-        "env": {}
+      "fs": {                                  // stdio server
+        "command": "npx",                      //   required: executable
+        "args": ["-y",                         //   optional: arguments
+                 "@modelcontextprotocol/server-filesystem", "/tmp"],
+        "env": { "LOG_LEVEL": "info" },         //   optional: extra env vars
+        "cwd": "/path/to/workdir"               //   optional: working directory
       },
-      "remote": {
-        "type": "http",
-        "url": "https://example.com/mcp",
-        "headers": { "Authorization": "Bearer ..." }
+      "remote": {                              // http server
+        "type": "http",                         //   optional but explicit
+        "url": "https://example.com/mcp",       //   required: endpoint URL
+        "headers": {                            //   optional: sent on every call
+          "Authorization": "Bearer XXX"
+        }
       }
     }
   }
 
-Config is searched (in order): ./climcp.json,
-~/.config/climcp/config.json, ~/.climcp.json.
+CONFIG SEARCH ORDER
+  When --config is not given, the first file that exists is used:
+    1. ./climcp.json                   (current directory)
+    2. ~/.config/climcp/config.json
+    3. ~/.climcp.json
+
+EXIT STATUS
+  0   success
+  1   error (bad arguments, config/connection failure, or the operation
+      itself reported an error)
 `
 
 func main() {
