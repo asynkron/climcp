@@ -11,10 +11,13 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"text/tabwriter"
+	"time"
 
 	"github.com/asynkron/climcp/internal/callexpr"
 	"github.com/asynkron/climcp/internal/config"
 	"github.com/asynkron/climcp/internal/mcp"
+	"github.com/asynkron/climcp/internal/ui"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -46,8 +49,14 @@ COMMANDS
 GLOBAL FLAGS
   --config <path>   Use a specific config file instead of searching the
                     default locations. May also be written --config=<path>.
-  --json            For 'call', print the raw JSON-RPC result (pretty-printed)
-                    instead of just the text content. Useful for piping to jq.
+  --json            Print machine-readable JSON instead of formatted text.
+                    Works with 'mcp list', 'describe', and 'call'.
+  --timeout <dur>   Abort if a server doesn't respond within this duration
+                    (default 60s). Accepts Go durations: 500ms, 30s, 2m.
+  --no-color        Disable colored output (or set the NO_COLOR env var).
+
+  Colors are used automatically only when writing to a terminal; piped or
+  redirected output is always plain.
 
 CALL SYNTAX
   An expression has three parts:
@@ -149,24 +158,51 @@ EXIT STATUS
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "climcp: "+err.Error())
+		prefix := "climcp:"
+		if info, statErr := os.Stderr.Stat(); statErr == nil && info.Mode()&os.ModeCharDevice != 0 && ui.Enabled() {
+			prefix = ui.Red(prefix)
+		}
+		fmt.Fprintln(os.Stderr, prefix+" "+err.Error())
 		os.Exit(1)
 	}
 }
 
-// parsedArgs holds the flags pulled out of the raw argv, plus the leftovers.
-type parsedArgs struct {
+// options holds the global flags shared by every command.
+type options struct {
 	configPath string
 	jsonOut    bool
-	describe   string // set by --describe
-	call       string // set by --call
-	rest       []string
+	timeout    time.Duration
+}
+
+// parsedArgs holds the flags pulled out of the raw argv, plus the leftovers.
+type parsedArgs struct {
+	opts     options
+	describe string // set by --describe
+	call     string // set by --call
+	rest     []string
 }
 
 func parseFlags(argv []string) (*parsedArgs, error) {
-	p := &parsedArgs{}
+	p := &parsedArgs{opts: options{timeout: 60 * time.Second}}
+
+	// needValue returns the value for a flag, supporting both "--flag value"
+	// and "--flag=value" forms.
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
+		valueFor := func(name string) (string, bool, error) {
+			if arg == name {
+				if i+1 >= len(argv) {
+					return "", false, fmt.Errorf("%s requires a value", name)
+				}
+				i++
+				return argv[i], true, nil
+			}
+			if strings.HasPrefix(arg, name+"=") {
+				return strings.TrimPrefix(arg, name+"="), true, nil
+			}
+			return "", false, nil
+		}
+
 		switch {
 		case arg == "--help" || arg == "-h" || arg == "help":
 			fmt.Print(usage)
@@ -175,32 +211,41 @@ func parseFlags(argv []string) (*parsedArgs, error) {
 			fmt.Printf("climcp %s\n", version)
 			os.Exit(0)
 		case arg == "--json":
-			p.jsonOut = true
-		case arg == "--config":
-			if i+1 >= len(argv) {
-				return nil, fmt.Errorf("--config requires a path argument")
-			}
-			i++
-			p.configPath = argv[i]
-		case strings.HasPrefix(arg, "--config="):
-			p.configPath = strings.TrimPrefix(arg, "--config=")
-		case arg == "--describe":
-			if i+1 >= len(argv) {
-				return nil, fmt.Errorf("--describe requires a server name")
-			}
-			i++
-			p.describe = argv[i]
-		case strings.HasPrefix(arg, "--describe="):
-			p.describe = strings.TrimPrefix(arg, "--describe=")
-		case arg == "--call":
-			if i+1 >= len(argv) {
-				return nil, fmt.Errorf("--call requires an expression")
-			}
-			i++
-			p.call = argv[i]
-		case strings.HasPrefix(arg, "--call="):
-			p.call = strings.TrimPrefix(arg, "--call=")
+			p.opts.jsonOut = true
+		case arg == "--no-color":
+			ui.SetEnabled(false)
 		default:
+			if v, ok, err := valueFor("--config"); err != nil {
+				return nil, err
+			} else if ok {
+				p.opts.configPath = v
+				continue
+			}
+			if v, ok, err := valueFor("--timeout"); err != nil {
+				return nil, err
+			} else if ok {
+				d, perr := time.ParseDuration(v)
+				if perr != nil {
+					return nil, fmt.Errorf("invalid --timeout %q: %v (use e.g. 30s, 2m)", v, perr)
+				}
+				p.opts.timeout = d
+				continue
+			}
+			if v, ok, err := valueFor("--describe"); err != nil {
+				return nil, err
+			} else if ok {
+				p.describe = v
+				continue
+			}
+			if v, ok, err := valueFor("--call"); err != nil {
+				return nil, err
+			} else if ok {
+				p.call = v
+				continue
+			}
+			if strings.HasPrefix(arg, "-") {
+				return nil, fmt.Errorf("unknown flag %q (try: climcp --help)", arg)
+			}
 			p.rest = append(p.rest, arg)
 		}
 	}
@@ -220,10 +265,10 @@ func run(argv []string) error {
 
 	// Flag-style invocations take precedence when present.
 	if p.describe != "" {
-		return cmdDescribe(p.configPath, p.describe)
+		return cmdDescribe(p.opts, p.describe)
 	}
 	if p.call != "" {
-		return cmdCall(p.configPath, p.call, p.jsonOut)
+		return cmdCall(p.opts, p.call)
 	}
 
 	if len(p.rest) == 0 {
@@ -234,50 +279,83 @@ func run(argv []string) error {
 	switch p.rest[0] {
 	case "mcp":
 		if len(p.rest) >= 2 && p.rest[1] == "list" {
-			return cmdList(p.configPath)
+			return cmdList(p.opts)
 		}
-		return fmt.Errorf("unknown 'mcp' subcommand; did you mean 'mcp list'?")
+		if len(p.rest) >= 2 {
+			return fmt.Errorf("unknown 'mcp' subcommand %q; did you mean 'mcp list'?", p.rest[1])
+		}
+		return fmt.Errorf("'mcp' needs a subcommand; did you mean 'mcp list'?")
 	case "list":
-		return cmdList(p.configPath)
+		return cmdList(p.opts)
 	case "describe":
 		if len(p.rest) < 2 {
 			return fmt.Errorf("describe requires a server name: climcp describe <server>")
 		}
-		return cmdDescribe(p.configPath, p.rest[1])
+		return cmdDescribe(p.opts, p.rest[1])
 	case "call":
 		if len(p.rest) < 2 {
 			return fmt.Errorf("call requires an expression: climcp call \"<server>.<op>(args)\"")
 		}
-		return cmdCall(p.configPath, p.rest[1], p.jsonOut)
+		return cmdCall(p.opts, p.rest[1])
 	default:
-		return fmt.Errorf("unknown command %q (try: climcp --help)", p.rest[0])
+		msg := fmt.Sprintf("unknown command %q", p.rest[0])
+		if s := suggestCommand(p.rest[0]); s != "" {
+			msg += fmt.Sprintf("; did you mean %q?", s)
+		}
+		return fmt.Errorf("%s (try: climcp --help)", msg)
 	}
 }
 
-func cmdList(configPath string) error {
-	cfg, err := config.Load(configPath)
+// suggestCommand returns the known command closest to input, if any is close.
+func suggestCommand(input string) string {
+	const maxDist = 2
+	best, bestDist := "", maxDist+1
+	for _, c := range []string{"mcp", "list", "describe", "call", "help", "version"} {
+		if d := config.EditDistance(input, c); d < bestDist {
+			best, bestDist = c, d
+		}
+	}
+	if bestDist <= maxDist {
+		return best
+	}
+	return ""
+}
+
+func cmdList(opts options) error {
+	cfg, err := config.Load(opts.configPath)
 	if err != nil {
 		return err
 	}
 	names := cfg.Names()
+
+	if opts.jsonOut {
+		return printJSON(cfg.Servers)
+	}
+
 	if len(names) == 0 {
-		fmt.Printf("No MCP servers configured in %s\n", cfg.Path)
+		fmt.Printf("No MCP servers configured in %s\n", ui.Dim(cfg.Path))
+		fmt.Println("\nAdd an \"mcpServers\" object to that file. See: climcp --help")
 		return nil
 	}
-	fmt.Printf("Configured MCP servers (%s):\n\n", cfg.Path)
+
+	plural := "servers"
+	if len(names) == 1 {
+		plural = "server"
+	}
+	fmt.Printf("%d MCP %s configured in %s\n\n", len(names), plural, ui.Dim(cfg.Path))
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintf(w, "  %s\t%s\t%s\n", ui.Dim("NAME"), ui.Dim("TRANSPORT"), ui.Dim("ENDPOINT"))
 	for _, name := range names {
 		s := cfg.Servers[name]
-		cmdline := s.Command
-		if len(s.Args) > 0 {
-			cmdline += " " + strings.Join(s.Args, " ")
-		}
-		fmt.Printf("  %-20s %s\n", name, cmdline)
+		fmt.Fprintf(w, "  %s\t%s\t%s\n", ui.Cyan(name), s.Transport(), s.Endpoint())
 	}
+	w.Flush()
 	return nil
 }
 
-func cmdDescribe(configPath, name string) error {
-	cfg, err := config.Load(configPath)
+func cmdDescribe(opts options, name string) error {
+	cfg, err := config.Load(opts.configPath)
 	if err != nil {
 		return err
 	}
@@ -286,7 +364,7 @@ func cmdDescribe(configPath, name string) error {
 		return err
 	}
 
-	ctx, cancel := signalContext()
+	ctx, cancel := commandContext(opts.timeout)
 	defer cancel()
 
 	client, err := mcp.Connect(ctx, srv)
@@ -300,26 +378,44 @@ func cmdDescribe(configPath, name string) error {
 		return err
 	}
 
-	info := client.ServerInfo()
-	if info.Name != "" {
-		fmt.Printf("%s (%s %s)\n\n", name, info.Name, info.Version)
-	} else {
-		fmt.Printf("%s\n\n", name)
+	if opts.jsonOut {
+		return printJSON(tools)
 	}
+
+	info := client.ServerInfo()
+	header := ui.Bold(ui.Cyan(name))
+	if info.Name != "" {
+		header += ui.Dim(fmt.Sprintf("  (%s %s)", info.Name, info.Version))
+	}
+	fmt.Println(header)
+	count := "no operations"
+	if len(tools) == 1 {
+		count = "1 operation"
+	} else if len(tools) > 1 {
+		count = fmt.Sprintf("%d operations", len(tools))
+	}
+	fmt.Printf("%s, via %s\n\n", ui.Dim(count), ui.Dim(srv.Transport()))
+
 	if len(tools) == 0 {
-		fmt.Println("  (no operations exposed)")
 		return nil
 	}
 	for _, t := range tools {
-		fmt.Printf("  %s(%s)\n", t.Name, summarizeParams(t.InputSchema))
-		if t.Description != "" {
-			for _, line := range strings.Split(strings.TrimSpace(t.Description), "\n") {
-				fmt.Printf("      %s\n", line)
+		fmt.Printf("  %s%s\n", ui.Green(t.Name), formatParams(t.InputSchema))
+		if d := strings.TrimSpace(t.Description); d != "" {
+			for _, line := range strings.Split(d, "\n") {
+				fmt.Printf("      %s\n", ui.Dim(line))
 			}
 		}
 		fmt.Println()
 	}
+	fmt.Printf("%s climcp call \"%s.<operation>(...)\"\n", ui.Dim("Call with:"), name)
 	return nil
+}
+
+// formatParams renders the parameter list with the server name suffix coloring
+// matched to the rest of the signature.
+func formatParams(schema json.RawMessage) string {
+	return "(" + summarizeParams(schema) + ")"
 }
 
 // summarizeParams renders an input JSON Schema as a compact parameter list,
@@ -377,13 +473,13 @@ func typeName(t interface{}) string {
 	return "any"
 }
 
-func cmdCall(configPath, expr string, jsonOut bool) error {
+func cmdCall(opts options, expr string) error {
 	call, err := callexpr.Parse(expr)
 	if err != nil {
 		return err
 	}
 
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(opts.configPath)
 	if err != nil {
 		return err
 	}
@@ -392,7 +488,7 @@ func cmdCall(configPath, expr string, jsonOut bool) error {
 		return err
 	}
 
-	ctx, cancel := signalContext()
+	ctx, cancel := commandContext(opts.timeout)
 	defer cancel()
 
 	client, err := mcp.Connect(ctx, srv)
@@ -406,10 +502,8 @@ func cmdCall(configPath, expr string, jsonOut bool) error {
 		return err
 	}
 
-	if jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(result); err != nil {
+	if opts.jsonOut {
+		if err := printJSON(result); err != nil {
 			return err
 		}
 	} else {
@@ -420,6 +514,13 @@ func cmdCall(configPath, expr string, jsonOut bool) error {
 		return fmt.Errorf("the operation reported an error (see output above)")
 	}
 	return nil
+}
+
+// printJSON pretty-prints v as JSON to stdout.
+func printJSON(v interface{}) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 func printResult(result *mcp.CallToolResult) {
@@ -437,15 +538,26 @@ func printResult(result *mcp.CallToolResult) {
 	}
 }
 
-// signalContext returns a context cancelled on SIGINT/SIGTERM so a hung server
-// doesn't leave climcp wedged.
-func signalContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
+// commandContext returns a context cancelled on SIGINT/SIGTERM and after the
+// given timeout, so a hung or unresponsive server can't leave climcp wedged.
+// A non-positive timeout means no deadline.
+func commandContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	var cancelTimeout context.CancelFunc = func() {}
+	if timeout > 0 {
+		base, cancelTimeout = context.WithTimeout(base, timeout)
+	}
+	ctx, cancel := context.WithCancel(base)
+
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-ch
 		cancel()
 	}()
-	return ctx, cancel
+	return ctx, func() {
+		signal.Stop(ch)
+		cancel()
+		cancelTimeout()
+	}
 }

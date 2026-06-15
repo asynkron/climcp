@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Server describes a single configured MCP server. It is either a stdio server
@@ -38,6 +39,19 @@ type Server struct {
 	// HTTP transport.
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// Endpoint returns a human-readable description of where the server lives: the
+// URL for http servers, or the command line for stdio servers.
+func (s Server) Endpoint() string {
+	if s.Transport() == "http" {
+		return s.URL
+	}
+	cmd := s.Command
+	if len(s.Args) > 0 {
+		cmd += " " + strings.Join(s.Args, " ")
+	}
+	return cmd
 }
 
 // Transport returns the transport kind for this server: "http" or "stdio".
@@ -71,13 +85,78 @@ func (c *Config) Names() []string {
 	return names
 }
 
-// Get returns the named server, or an error if it is not configured.
+// Get returns the named server, or an error if it is not configured. The error
+// includes a "did you mean" hint when a similar name exists.
 func (c *Config) Get(name string) (Server, error) {
 	s, ok := c.Servers[name]
-	if !ok {
-		return Server{}, fmt.Errorf("no MCP server named %q is configured in %s", name, c.Path)
+	if ok {
+		return s, nil
 	}
-	return s, nil
+	msg := fmt.Sprintf("no MCP server named %q is configured in %s", name, c.Path)
+	if suggestion := c.Suggest(name); suggestion != "" {
+		msg += fmt.Sprintf("\n\nDid you mean %q? Run 'climcp mcp list' to see all servers.", suggestion)
+	} else if len(c.Servers) > 0 {
+		msg += "\n\nRun 'climcp mcp list' to see the configured servers."
+	}
+	return Server{}, fmt.Errorf("%s", msg)
+}
+
+// Suggest returns the configured server name closest to the given input (by
+// edit distance), or "" if nothing is close enough to be helpful.
+func (c *Config) Suggest(input string) string {
+	best := ""
+	bestDist := 1 << 30
+	for _, name := range c.Names() {
+		d := EditDistance(input, name)
+		if d < bestDist {
+			bestDist = d
+			best = name
+		}
+	}
+	// Only suggest when the names are genuinely close: within a third of the
+	// longer name's length (and always allow a distance of 1 or 2).
+	threshold := len(input)
+	if len(best) > threshold {
+		threshold = len(best)
+	}
+	threshold = threshold/3 + 1
+	if bestDist <= threshold {
+		return best
+	}
+	return ""
+}
+
+// EditDistance computes the Levenshtein edit distance between two strings.
+func EditDistance(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur := make([]int, len(rb)+1)
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min3(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(rb)]
+}
+
+func min3(a, b, c int) int {
+	m := a
+	if b < m {
+		m = b
+	}
+	if c < m {
+		m = c
+	}
+	return m
 }
 
 // candidatePaths returns the default locations searched when no explicit path
