@@ -118,6 +118,7 @@ for anyone who clones it and runs `climcp` from the repo root:
 | `fs` | `npx … server-filesystem .` | Read/write files within the repo. |
 | `git` | `uvx mcp-server-git --repository .` | Status, diffs, log, blame on this repo. |
 | `time` | `uvx mcp-server-time` | Current time and timezone conversions. |
+| `fetch` | `uvx mcp-server-fetch` | Fetch a URL (HTML→markdown, or `raw`). **Reaches the network.** |
 
 Prerequisites: [`gopls`](https://pkg.go.dev/golang.org/x/tools/gopls)
 (`go install golang.org/x/tools/gopls@latest`), `npx` (Node), and `uvx`
@@ -214,39 +215,58 @@ shell instead of being shuttled back through the model's context.
 
 A tool's payload is usually JSON encoded inside a text content block, so the
 recurring move is `jq -r '.content[0].text'` to unwrap it, then a second `jq` to
-reshape it.
+reshape it. All three examples below run as-is against this repo's
+[`climcp.json`](climcp.json).
+
+**1. Is our `go.mod` behind the latest Go release?** — joins three servers:
+`fetch` (the web) + `fs` (local file) + `time` (a stamp).
 
 ```sh
-# 1. Fetch open issues from a GitHub MCP server
-# 2. jq out the number of the most recently updated one
-# 3. Fetch that issue's full details from the MCP
-# 4. jq the final shape we care about
-issue=$(climcp --json call "github.list_issues(repo: 'asynkron/climcp', state: 'open')" \
-  | jq -r '.content[0].text' \
-  | jq 'sort_by(.updated_at) | last | .number')
+latest=$(climcp --json call "fetch.fetch(url: 'https://go.dev/VERSION?m=text', raw: true)" \
+         | jq -r '.content[0].text' | sed -n 's/^go\([0-9.]*\)$/\1/p' | head -1)
+ours=$(climcp --json call "fs.read_text_file(path: 'go.mod')" \
+       | jq -r '.content[0].text' | awk '/^go /{print $2}')
+now=$(climcp --json call "time.get_current_time(timezone: 'Europe/Stockholm')" \
+      | jq -r '.content[0].text' | jq -r '.datetime')
 
-climcp --json call "github.get_issue(repo: 'asynkron/climcp', number: $issue)" \
-  | jq -r '.content[0].text' \
-  | jq '{title, author: .user.login, comments}'
+jq -n --arg latest "$latest" --arg ours "$ours" --arg now "$now" \
+  '{checked_at:$now, latest_stable_go:$latest, our_go_directive:$ours,
+    minor_versions_behind: (($latest|split(".")[1]|tonumber) - ($ours|split(".")[1]|tonumber))}'
+# → {"checked_at":"2026-…","latest_stable_go":"1.26.4","our_go_directive":"1.23","minor_versions_behind":3}
 ```
 
-Each step is independent and composable: swap a `jq` filter, redirect to a file,
-`xargs` the results into N parallel calls, feed one server's output into a
-different server. None of this is expressible in the MCP protocol, where the
-agent would have to carry every intermediate result through its own context just
-to hand it to the next tool call.
+**2. Is my local commit in sync with GitHub?** — cross-references a *local* MCP
+(`git`) against a *remote* one (`fetch`). No single MCP can see both sides.
 
 ```sh
-# Cross-server: read a list of URLs from disk via one MCP, fetch each via another
-climcp --json call "fs.read_text_file(path: '/tmp/urls.txt')" \
+local=$(climcp call "git.git_log(repo_path: '.', max_count: 1)" \
+        | sed -n "s/^Commit: '\([0-9a-f]\{40\}\)'.*/\1/p")
+remote=$(climcp --json call "fetch.fetch(url: 'https://api.github.com/repos/asynkron/climcp/commits?per_page=1', raw: true, max_length: 9000)" \
+         | jq -r '.content[0].text' | sed -n '/^\[/,$p' | jq -r '.[0].sha')
+
+jq -n --arg l "$local" --arg r "$remote" \
+  '{local_head:$l[0:12], github_head:$r[0:12], in_sync:($l==$r)}'
+# → {"local_head":"e2a4f8698f15","github_head":"e2a4f8698f15","in_sync":true}
+```
+
+**3. Link-check the README** — `fs` reads a local file, we extract its URLs, then
+`fetch` fans out over the network. Local → transform → remote fan-out → join.
+
+```sh
+climcp --json call "fs.read_text_file(path: 'README.md')" \
   | jq -r '.content[0].text' \
-  | while read -r url; do
-      climcp --json call "fetch.fetch(url: '$url')" | jq -r '.content[0].text | length'
+  | grep -oE 'https?://[a-zA-Z0-9./?=_%:-]+' | sort -u \
+  | while IFS= read -r u; do
+      txt=$(climcp --json call "fetch.fetch(url: '$u', max_length: 80)" | jq -r '.content[0].text // empty')
+      [ -n "$txt" ] && echo "✓ $u" || echo "✗ $u"
     done
 ```
 
-> The operation and field names above (`github.list_issues`, `fetch.fetch`, …)
-> are illustrative — run `climcp describe <server>` to see the real ones.
+Each step is independent and composable: swap a `jq` filter, redirect to a file,
+`xargs` the results into N parallel calls, feed one server's output into another.
+None of this is expressible in the MCP protocol, where the agent would have to
+carry every intermediate result through its own context just to hand it to the
+next tool call.
 
 ## How it works
 
