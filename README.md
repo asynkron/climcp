@@ -110,7 +110,7 @@ are skipped by default (reported), unless you pass `--overwrite`.
 | `climcp describe <server>` | Connect and list the server's operations and parameters. |
 | `climcp call "<server>.<op>(args)"` | Invoke an operation with arguments. |
 | `climcp import <file>` | Merge servers from an existing config into your `climcp.json`. |
-| `climcp --help` | Detailed help with the full call grammar and examples. |
+| `climcp --help` | Detailed help — also lists your configured servers and the next steps. |
 | `climcp --version` | Print the version. |
 
 Flag-style aliases also work: `climcp --describe <server>` and

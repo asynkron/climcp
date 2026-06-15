@@ -28,6 +28,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can't wedge the CLI.
 - "Did you mean …?" suggestions for unknown server names and commands.
 - TTY-aware colored output, honoring `NO_COLOR` and `--no-color`.
-- Detailed `--help` with full call grammar and worked examples.
+- Detailed `--help` with full call grammar and worked examples. The help is
+  dynamic: it lists the servers currently configured (honoring `--config`) with
+  the next-step `describe`/`call` workflow, so an agent sees what's available at
+  a glance.
 
 [Unreleased]: https://github.com/asynkron/climcp/commits/main

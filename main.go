@@ -23,12 +23,13 @@ import (
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
-const usage = `climcp - a bridge to MCP servers (stdio and http)
+const usageHeader = `climcp - a bridge to MCP servers (stdio and http)
 
   Lists configured Model Context Protocol servers, describes the operations
   each one exposes, and calls those operations from your shell.
+`
 
-USAGE
+const usageBody = `USAGE
   climcp <command> [arguments] [flags]
   climcp [flags]
 
@@ -209,6 +210,8 @@ type parsedArgs struct {
 	importTo   string // set by --to
 	overwrite  bool   // set by --overwrite
 	dryRun     bool   // set by --dry-run
+	help       bool   // set by --help / -h / help
+	showVer    bool   // set by --version / -v / version
 	rest       []string
 }
 
@@ -235,11 +238,9 @@ func parseFlags(argv []string) (*parsedArgs, error) {
 
 		switch {
 		case arg == "--help" || arg == "-h" || arg == "help":
-			fmt.Print(usage)
-			os.Exit(0)
+			p.help = true
 		case arg == "--version" || arg == "-v" || arg == "version":
-			fmt.Printf("climcp %s\n", version)
-			os.Exit(0)
+			p.showVer = true
 		case arg == "--json":
 			p.opts.jsonOut = true
 		case arg == "--no-color":
@@ -300,13 +301,23 @@ func parseFlags(argv []string) (*parsedArgs, error) {
 
 func run(argv []string) error {
 	if len(argv) == 0 {
-		fmt.Print(usage)
+		printHelp("")
 		return nil
 	}
 
 	p, err := parseFlags(argv)
 	if err != nil {
 		return err
+	}
+
+	// help and version short-circuit everything else.
+	if p.help {
+		printHelp(p.opts.configPath)
+		return nil
+	}
+	if p.showVer {
+		fmt.Printf("climcp %s\n", version)
+		return nil
 	}
 
 	// Flag-style invocations take precedence when present.
@@ -321,7 +332,7 @@ func run(argv []string) error {
 	}
 
 	if len(p.rest) == 0 {
-		fmt.Print(usage)
+		printHelp(p.opts.configPath)
 		return nil
 	}
 
@@ -358,6 +369,48 @@ func run(argv []string) error {
 		}
 		return fmt.Errorf("%s (try: climcp --help)", msg)
 	}
+}
+
+// printHelp prints the manual, with a live list of the servers currently
+// configured spliced in near the top so an agent immediately sees what is
+// available and how to reach it.
+func printHelp(configPath string) {
+	fmt.Print(usageHeader)
+	printConfiguredServers(configPath)
+	fmt.Print(usageBody)
+}
+
+// printConfiguredServers renders the CONFIGURED SERVERS section. It loads the
+// config best-effort: a missing or unreadable config is reported as "none",
+// never as an error, because --help must always succeed.
+func printConfiguredServers(configPath string) {
+	fmt.Println()
+	fmt.Println(ui.Bold("CONFIGURED SERVERS"))
+
+	cfg, err := config.Load(configPath)
+	if err != nil || len(cfg.Servers) == 0 {
+		fmt.Println("  None found yet. Add an \"mcpServers\" object to a climcp.json,")
+		fmt.Println("  or import an existing config:  climcp import <file>")
+		fmt.Println("  (searched ./climcp.json, ~/.config/climcp/config.json, ~/.climcp.json)")
+		fmt.Println()
+		return
+	}
+
+	names := cfg.Names()
+	fmt.Printf("  %s\n", ui.Dim("from "+cfg.Path))
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	for _, name := range names {
+		s := cfg.Servers[name]
+		fmt.Fprintf(w, "    %s\t%s\t%s\n", ui.Cyan(name), s.Transport(), ui.Dim(s.Endpoint()))
+	}
+	w.Flush()
+
+	// Show the agent the exact next steps using a real server name.
+	example := names[0]
+	fmt.Printf("\n  Next: %s   then   %s\n\n",
+		ui.Green(fmt.Sprintf("climcp describe %s", example)),
+		ui.Green(fmt.Sprintf("climcp call \"%s.<operation>(...)\"", example)),
+	)
 }
 
 // suggestCommand returns the known command closest to input, if any is close.
